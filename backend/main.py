@@ -1,0 +1,112 @@
+"""Lumalog - Backend Entry Point"""
+import os
+import shutil
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from app.auth import hash_password
+from app.database import engine, Base
+from app.models.user import User
+from app.routers import weight, food, exercise, settings, ai, mi_fit, auth
+from app.upload_paths import UPLOAD_ROOT
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Create tables on startup
+    Base.metadata.create_all(bind=engine)
+    ensure_lightweight_migrations()
+    # Ensure upload directories exist
+    os.makedirs(UPLOAD_ROOT / "food", exist_ok=True)
+    os.makedirs(UPLOAD_ROOT / "avatar", exist_ok=True)
+    migrate_legacy_uploads()
+    yield
+
+
+def ensure_lightweight_migrations():
+    """Keep local SQLite installs compatible with small model additions."""
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "UPDATE users SET email = ? WHERE email = ?",
+            ("default@local.lumalog", "default@local.qingji"),
+        )
+        conn.exec_driver_sql(
+            "UPDATE users SET password_hash = ? WHERE id = 1 OR email = ?",
+            (hash_password("lumalog123"), "default@local.lumalog"),
+        )
+        users = conn.exec_driver_sql("SELECT id FROM users WHERE id = 1").fetchone()
+        if not users:
+            conn.exec_driver_sql(
+                "INSERT INTO users (id, email, password_hash, created_at) VALUES (1, ?, ?, CURRENT_TIMESTAMP)",
+                ("default@local.lumalog", hash_password("lumalog123")),
+            )
+        user_columns = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()]
+        if "avatar_path" not in user_columns:
+            conn.exec_driver_sql("ALTER TABLE users ADD COLUMN avatar_path VARCHAR(300)")
+
+        columns = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(user_settings)").fetchall()]
+        if "user_id" not in columns:
+            conn.exec_driver_sql("ALTER TABLE user_settings ADD COLUMN user_id INTEGER DEFAULT 1")
+            conn.exec_driver_sql("UPDATE user_settings SET user_id = 1 WHERE user_id IS NULL")
+        if "openai_base_url" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE user_settings "
+                "ADD COLUMN openai_base_url VARCHAR(300) DEFAULT 'https://api.openai.com/v1'"
+            )
+
+        for table in ("weight_records", "food_records", "exercise_records", "exercise_activity_details"):
+            table_columns = [row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()]
+            if "user_id" not in table_columns:
+                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER DEFAULT 1")
+                conn.exec_driver_sql(f"UPDATE {table} SET user_id = 1 WHERE user_id IS NULL")
+
+
+def migrate_legacy_uploads():
+    legacy_root = Path("uploads")
+    if not legacy_root.exists() or legacy_root.resolve() == UPLOAD_ROOT:
+        return
+    for kind in ("food", "avatar"):
+        src = legacy_root / kind
+        if src.exists():
+            shutil.copytree(src, UPLOAD_ROOT / kind, dirs_exist_ok=True)
+
+
+app = FastAPI(
+    title="Lumalog API",
+    description="减重记录与健康追踪 API",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+frontend_port = os.getenv("FRONTEND_PORT", "7012")
+
+# CORS for Vite dev server
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[f"http://localhost:{frontend_port}", f"http://127.0.0.1:{frontend_port}"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Static files for uploaded images
+UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_ROOT)), name="uploads")
+
+# Routers
+app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(weight.router, prefix="/api/weight", tags=["Weight"])
+app.include_router(food.router, prefix="/api/food", tags=["Food"])
+app.include_router(exercise.router, prefix="/api/exercise", tags=["Exercise"])
+app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
+app.include_router(ai.router, prefix="/api/ai", tags=["AI"])
+app.include_router(mi_fit.router, prefix="/api/mi-fit", tags=["Mi Fit"])
+
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok", "app": "Lumalog"}

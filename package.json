@@ -1,0 +1,12 @@
+{
+  "name": "lumalog",
+  "version": "0.1.0",
+  "description": "Lumalog - 减重记录与健康追踪应用",
+  "private": true,
+  "scripts": {
+    "dev": "cd frontend && npm run dev -- --host 127.0.0.1 --port 7012",
+    "dev:backend": "cd backend && ../Mi-Fitness-Sync-main/.venv/Scripts/python.exe -m uvicorn main:app --reload --reload-dir app --port 7014",
+    "build": "cd frontend && npm run build",
+    "install:frontend": "cd frontend && npm install"
+  }
+}

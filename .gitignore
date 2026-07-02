@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Python environments
+.venv/
+venv/
+env/
+Mi-Fitness-Sync-main/.venv/
+
+# Build output
+dist/
+frontend/dist/
+*.tsbuildinfo
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local database
+backend/*.db
+backend/*.sqlite
+backend/*.sqlite3
+*.db
+*.sqlite
+*.sqlite3
+
+# Local uploads and account-bound runtime state
+data/uploads/
+backend/uploads/
+backend/data/mi_fit/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs
+*.log
+logs/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local generated files
+.playwright-cli/
+Mi-Fitness-Sync-main.zip
+Mi-Fitness-Sync-main/exports/
+Mi-Fitness-Sync-main/.pytest_cache/
