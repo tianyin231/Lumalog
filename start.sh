@@ -6,6 +6,7 @@ FRONTEND_PORT="${FRONTEND_PORT:-7012}"
 BACKEND_PORT="${BACKEND_PORT:-7014}"
 VENV_DIR="$ROOT_DIR/Mi-Fitness-Sync-main/.venv"
 BACKEND_PY="$VENV_DIR/bin/python"
+export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE:-$ROOT_DIR/.npm-cache}"
 
 cd "$ROOT_DIR"
 
