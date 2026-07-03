@@ -126,6 +126,30 @@ Windows 用户也可以双击 `start.bat` 一次启动前后端。
 - 后端：`http://localhost:7014`
 - API 文档：`http://localhost:7014/docs`
 
+## 生产部署
+
+线上不要使用 `npm run dev` 作为前端服务。生产环境应先执行 `npm run build` 生成 `frontend/dist`，再由 FastAPI 后端直接托管静态文件和 API。这样只需要暴露一个端口，加载速度也会明显优于 Vite 开发服务器。
+
+下面的一行式命令适合宝塔 Node 项目的“自定义启动命令”。请把 `/www/codex_work/Lumalog` 替换成服务器上的实际项目目录：
+
+```bash
+bash -lc 'cd /www/codex_work/Lumalog || exit 1; export HOME="$PWD/.home" PIP_CACHE_DIR="$PWD/.pip-cache" NPM_CONFIG_CACHE="$PWD/.npm-cache"; mkdir -p "$HOME" "$PIP_CACHE_DIR" "$NPM_CONFIG_CACHE"; cd frontend && npm install --cache ../.npm-cache && npm run build || exit 1; test -f dist/index.html || exit 1; cd ../backend && ../Mi-Fitness-Sync-main/.venv/bin/python -m pip install -r requirements.txt || exit 1; exec ../Mi-Fitness-Sync-main/.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 7014'
+```
+
+生产访问地址：
+
+- 应用入口：`http://服务器IP:7014/`
+- API 文档：`http://服务器IP:7014/docs`
+
+宝塔或反向代理中，项目端口填写 `7014`。前端页面和 `/api` 都从同一个端口提供，不需要再单独开放 `7012`。
+
+首次部署前请确保后端虚拟环境已用 Python 3.12 或更高版本创建：
+
+```bash
+cd /www/codex_work/Lumalog
+python3.12 -m venv Mi-Fitness-Sync-main/.venv
+```
+
 ## 默认账号
 
 开发环境会初始化一个默认账号：

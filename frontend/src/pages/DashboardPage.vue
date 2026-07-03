@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { BarChart3, Dumbbell } from 'lucide-vue-next'
+import { BarChart3, ChevronLeft, ChevronRight, Dumbbell } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { LineChart, BarChart } from 'echarts/charts'
@@ -15,6 +15,13 @@ const store = useAppStore()
 const router = useRouter()
 
 interface TrendPoint { date: string; weight: number; bmi: number | null; smoothed: number | null }
+interface WeightRecord {
+  id: number; weight_kg: number; bmi: number | null; body_fat_pct: number | null
+  note: string | null; source: string; recorded_at: string
+}
+interface FoodRecord {
+  id: number; meal_type: string; total_calories: number; note: string | null; recorded_at: string
+}
 interface WeightStats {
   current_weight: number | null; start_weight: number | null; weight_change: number | null
   avg_7days: number | null; min_weight: number | null; max_weight: number | null
@@ -30,7 +37,12 @@ interface DailyExerciseSummary { total_calories_burned: number }
 
 const stats = ref<WeightStats | null>(null)
 const trendPoints = ref<TrendPoint[]>([])
+const monthWeights = ref<WeightRecord[]>([])
+const monthFoods = ref<FoodRecord[]>([])
+const monthExercises = ref<ExerciseRecord[]>([])
 const recentExercises = ref<ExerciseRecord[]>([])
+const selectedMonth = ref(monthStart(new Date()))
+const diaryLoading = ref(false)
 const loading = ref(true)
 
 onMounted(async () => {
@@ -57,13 +69,126 @@ onMounted(async () => {
     store.settings.targetWeightKg = settings.target_weight_kg
     store.settings.dailyCalorieTarget = settings.daily_calorie_target
     store.currentWeight = stats.value?.current_weight ?? null
+    await loadDiaryMonth()
   } catch (e) { console.error(e) }
   finally { loading.value = false }
 })
 
+function monthStart(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1)
+}
+
 function localDateKey(date = new Date()) {
   const offsetMs = date.getTimezoneOffset() * 60 * 1000
   return new Date(date.getTime() - offsetMs).toISOString().slice(0, 10)
+}
+
+function daysSince(date: Date) {
+  const now = new Date()
+  return Math.ceil((now.getTime() - date.getTime()) / 86400000) + 1
+}
+
+function dateKeyFromString(value: string) {
+  return localDateKey(new Date(value))
+}
+
+const monthLabel = computed(() => {
+  return selectedMonth.value.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long' })
+})
+
+const canGoNextMonth = computed(() => {
+  const current = monthStart(new Date())
+  return selectedMonth.value < current
+})
+
+const diaryCells = computed(() => {
+  const year = selectedMonth.value.getFullYear()
+  const month = selectedMonth.value.getMonth()
+  const daysInMonth = new Date(year, month + 1, 0).getDate()
+  const firstDay = new Date(year, month, 1).getDay()
+  const summaries: Record<string, {
+    weight?: WeightRecord; calories: number; exerciseKcal: number; exerciseMin: number; notes: string[]
+  }> = {}
+
+  for (const item of monthWeights.value) {
+    const key = dateKeyFromString(item.recorded_at)
+    summaries[key] ??= { calories: 0, exerciseKcal: 0, exerciseMin: 0, notes: [] }
+    summaries[key].weight = item
+    if (item.note) summaries[key].notes.push(item.note)
+  }
+
+  for (const item of monthFoods.value) {
+    const key = dateKeyFromString(item.recorded_at)
+    summaries[key] ??= { calories: 0, exerciseKcal: 0, exerciseMin: 0, notes: [] }
+    summaries[key].calories += item.total_calories || 0
+    if (item.note) summaries[key].notes.push(item.note)
+  }
+
+  for (const item of monthExercises.value) {
+    const key = dateKeyFromString(item.recorded_at)
+    summaries[key] ??= { calories: 0, exerciseKcal: 0, exerciseMin: 0, notes: [] }
+    summaries[key].exerciseKcal += item.calories_burned || 0
+    summaries[key].exerciseMin += item.duration_minutes || 0
+    if (item.note) summaries[key].notes.push(item.note)
+  }
+
+  const cells: Array<{
+    key: string; day: number | null; level: number; isToday: boolean; summary: string
+  }> = []
+
+  for (let i = 0; i < firstDay; i += 1) {
+    cells.push({ key: `blank-${i}`, day: null, level: 0, isToday: false, summary: '' })
+  }
+
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const date = new Date(year, month, day)
+    const key = localDateKey(date)
+    const data = summaries[key]
+    const parts = [`${month + 1}月${day}日`]
+    if (data?.weight) parts.push(`体重 ${data.weight.weight_kg}kg`)
+    if (data?.calories) parts.push(`摄入 ${Math.round(data.calories)}kcal`)
+    if (data?.exerciseKcal) parts.push(`运动 ${Math.round(data.exerciseKcal)}kcal / ${data.exerciseMin}分钟`)
+    if (data?.notes.length) parts.push(`备注 ${data.notes.slice(0, 2).join('；')}`)
+
+    const score = (data?.weight ? 1 : 0) + (data?.calories ? 1 : 0) + (data?.exerciseKcal ? 1 : 0) + Math.min(data?.notes.length || 0, 1)
+    cells.push({
+      key,
+      day,
+      level: Math.min(score, 4),
+      isToday: key === localDateKey(),
+      summary: data ? parts.join(' · ') : `${month + 1}月${day}日 · 暂无记录`,
+    })
+  }
+
+  return cells
+})
+
+async function loadDiaryMonth() {
+  diaryLoading.value = true
+  try {
+    const days = Math.min(daysSince(selectedMonth.value), 3650)
+    const [wRes, eRes, foodListRes] = await Promise.all([
+      fetch(`/api/weight/?days=${days}`),
+      fetch(`/api/exercise/?days=${days}`),
+      fetch(`/api/food/?days=${days}`),
+    ])
+    const monthPrefix = localDateKey(selectedMonth.value).slice(0, 7)
+    monthWeights.value = (await wRes.json()).filter((item: WeightRecord) => dateKeyFromString(item.recorded_at).startsWith(monthPrefix))
+    monthExercises.value = (await eRes.json()).filter((item: ExerciseRecord) => dateKeyFromString(item.recorded_at).startsWith(monthPrefix))
+    monthFoods.value = (await foodListRes.json()).filter((item: FoodRecord) => dateKeyFromString(item.recorded_at).startsWith(monthPrefix))
+  } catch (e) {
+    console.error(e)
+  } finally {
+    diaryLoading.value = false
+  }
+}
+
+function changeDiaryMonth(offset: number) {
+  const next = monthStart(new Date(selectedMonth.value.getFullYear(), selectedMonth.value.getMonth() + offset, 1))
+  const current = monthStart(new Date())
+  if (next > current) return
+  selectedMonth.value = next
+  loadDiaryMonth()
 }
 
 function readCssColor(name: string, fallback: string) {
@@ -254,6 +379,60 @@ function openExerciseDetail(item: ExerciseRecord) {
         </div>
       </div>
 
+      <!-- Monthly Diary -->
+      <div class="card card-diary motion-card" style="animation-delay: 190ms">
+        <div class="diary-head">
+          <div>
+            <div class="card-label">日记热力图</div>
+            <div class="diary-nav">
+              <button
+                type="button"
+                class="diary-nav-btn"
+                aria-label="查看上个月"
+                :disabled="diaryLoading"
+                @click="changeDiaryMonth(-1)"
+              >
+                <ChevronLeft class="diary-nav-icon" />
+              </button>
+              <div class="diary-title">{{ monthLabel }}</div>
+              <button
+                type="button"
+                class="diary-nav-btn"
+                aria-label="查看下个月"
+                :disabled="diaryLoading || !canGoNextMonth"
+                @click="changeDiaryMonth(1)"
+              >
+                <ChevronRight class="diary-nav-icon" />
+              </button>
+            </div>
+          </div>
+          <div class="diary-legend" aria-label="记录强度图例">
+            <span>少</span>
+            <i class="level-1" />
+            <i class="level-2" />
+            <i class="level-3" />
+            <i class="level-4" />
+            <span>多</span>
+          </div>
+        </div>
+        <div class="diary-weekdays" :class="{ loading: diaryLoading }" aria-hidden="true">
+          <span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span>
+        </div>
+        <div class="diary-grid" :class="{ loading: diaryLoading }" aria-label="本月记录热力图">
+          <div
+            v-for="cell in diaryCells"
+            :key="cell.key"
+            class="diary-cell"
+            :class="[`level-${cell.level}`, { blank: !cell.day, today: cell.isToday }]"
+            :data-tooltip="cell.summary"
+            :tabindex="cell.day ? 0 : -1"
+            :aria-label="cell.summary"
+          >
+            <span v-if="cell.day">{{ cell.day }}</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Recent Exercises -->
       <div class="card card-recent-exercise motion-card" style="animation-delay: 200ms">
         <div class="card-label">最近运动</div>
@@ -359,6 +538,14 @@ function openExerciseDetail(item: ExerciseRecord) {
 
 .card-recent-exercise {
   grid-column: span 2;
+  min-height: 304px;
+  justify-content: flex-start;
+  gap: 14px;
+}
+
+.card-diary {
+  grid-column: span 2;
+  grid-row: span 2;
   min-height: 304px;
   justify-content: flex-start;
   gap: 14px;
@@ -498,6 +685,171 @@ function openExerciseDetail(item: ExerciseRecord) {
   opacity: 0.78;
 }
 
+/* Monthly diary heatmap */
+.diary-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.diary-title {
+  color: var(--color-text);
+  font-family: var(--font-heading);
+  font-size: 20px;
+  font-weight: 750;
+  min-width: 116px;
+  text-align: center;
+}
+
+.diary-nav {
+  margin-top: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.diary-nav-btn {
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border-light);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.34);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: transform var(--duration-fast) var(--ease-standard), background var(--duration-base), border-color var(--duration-base), opacity var(--duration-base);
+}
+
+.diary-nav-btn:hover:not(:disabled),
+.diary-nav-btn:focus-visible {
+  background: rgba(15, 143, 131, 0.09);
+  border-color: rgba(15, 143, 131, 0.24);
+  color: var(--color-primary);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.diary-nav-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.diary-nav-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.diary-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.diary-legend i {
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--color-border-light);
+}
+
+.diary-weekdays,
+.diary-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.diary-weekdays span {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  text-align: center;
+}
+
+.diary-weekdays.loading,
+.diary-grid.loading {
+  opacity: 0.56;
+  pointer-events: none;
+}
+
+.diary-cell {
+  position: relative;
+  height: 44px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-light);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.28);
+  transition: transform var(--duration-fast) var(--ease-standard), border-color var(--duration-base), background var(--duration-base), box-shadow var(--duration-base);
+}
+
+.diary-cell:not(.blank) {
+  cursor: default;
+}
+
+.diary-cell:not(.blank):hover,
+.diary-cell:not(.blank):focus-visible {
+  z-index: 5;
+  transform: translateY(-2px);
+  border-color: rgba(15, 143, 131, 0.38);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.14);
+  outline: none;
+}
+
+.diary-cell:not(.blank):hover::after,
+.diary-cell:not(.blank):focus-visible::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: max-content;
+  max-width: min(280px, 80vw);
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: rgba(16, 32, 31, 0.94);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  transform: translateX(-50%);
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+}
+
+.diary-cell.blank {
+  border-color: transparent;
+  background: transparent;
+}
+
+.diary-cell.today {
+  box-shadow: inset 0 0 0 2px var(--color-primary);
+}
+
+.diary-cell.level-1,
+.diary-legend .level-1 { background: rgba(15, 143, 131, 0.16); }
+
+.diary-cell.level-2,
+.diary-legend .level-2 { background: rgba(15, 143, 131, 0.32); }
+
+.diary-cell.level-3,
+.diary-legend .level-3 { background: rgba(15, 143, 131, 0.52); color: #fff; }
+
+.diary-cell.level-4,
+.diary-legend .level-4 { background: rgba(15, 143, 131, 0.78); color: #fff; }
+
 /* Recent exercise */
 .exercise-mini-list {
   display: flex;
@@ -598,14 +950,20 @@ function openExerciseDetail(item: ExerciseRecord) {
 @media (max-width: 640px) {
   .bento { grid-template-columns: 1fr; }
   .card-wide,
+  .card-diary,
   .card-recent-exercise { grid-column: span 1; }
+  .card-diary,
   .card-recent-exercise { min-height: 304px; }
+  .card-diary { grid-row: span 2; }
+  .diary-cell { height: 40px; }
   .card-hero { order: 1; }
   .card-wide { order: 2; }
-  .card-trend-summary { order: 3; }
-  .card-calories { order: 4; }
-  .card-today-exercise { order: 5; }
-  .card-recent-exercise { order: 6; }
+  .card-diary { order: 3; }
+  .card-trend-summary { order: 4; }
+  .card-calories { order: 5; }
+  .card-today-exercise { order: 6; }
+  .card-recent-exercise { order: 7; }
+  .diary-head { flex-direction: column; }
   .hero-num { font-size: 40px; }
   .greeting { font-size: 22px; }
 }
