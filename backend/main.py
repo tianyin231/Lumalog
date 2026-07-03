@@ -4,8 +4,9 @@ import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import hash_password
@@ -13,6 +14,8 @@ from app.database import engine, Base
 from app.models.user import User
 from app.routers import weight, food, exercise, settings, ai, mi_fit, auth
 from app.upload_paths import UPLOAD_ROOT
+
+FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 
 
 @asynccontextmanager
@@ -110,3 +113,21 @@ app.include_router(mi_fit.router, prefix="/api/mi-fit", tags=["Mi Fit"])
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "app": "Lumalog"}
+
+
+assets_dir = FRONTEND_DIST / "assets"
+if assets_dir.exists():
+    app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+
+@app.get("/{full_path:path}")
+def serve_frontend(full_path: str):
+    requested = FRONTEND_DIST / full_path
+    if full_path and requested.is_file():
+        return FileResponse(requested)
+
+    index_file = FRONTEND_DIST / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+
+    raise HTTPException(status_code=404, detail="Frontend build not found. Run `npm run build` in frontend.")
