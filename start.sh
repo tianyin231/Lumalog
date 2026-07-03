@@ -29,27 +29,37 @@ PY
 run_with_sudo() {
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
-  else
+  elif sudo -n true >/dev/null 2>&1; then
     sudo "$@"
+  else
+    return 1
   fi
+}
+
+print_manual_install() {
+  echo "Automatic installation needs root or passwordless sudo."
+  echo "Run these commands in an interactive server terminal, then run ./start.sh again:"
+  echo
+  echo "$@"
+  exit 1
 }
 
 install_python() {
   echo "Python 3.12 or newer was not found. Trying to install Python 3.12..."
 
   if command -v apt-get >/dev/null 2>&1; then
-    run_with_sudo apt-get update
-    run_with_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev
+    run_with_sudo apt-get update || print_manual_install "sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv python3.12-dev"
+    run_with_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev || print_manual_install "sudo apt-get install -y python3.12 python3.12-venv python3.12-dev"
     return
   fi
 
   if command -v dnf >/dev/null 2>&1; then
-    run_with_sudo dnf install -y python3.12 python3.12-devel
+    run_with_sudo dnf install -y python3.12 python3.12-devel || print_manual_install "sudo dnf install -y python3.12 python3.12-devel"
     return
   fi
 
   if command -v yum >/dev/null 2>&1; then
-    run_with_sudo yum install -y python3.12 python3.12-devel
+    run_with_sudo yum install -y python3.12 python3.12-devel || print_manual_install "sudo yum install -y python3.12 python3.12-devel"
     return
   fi
 
