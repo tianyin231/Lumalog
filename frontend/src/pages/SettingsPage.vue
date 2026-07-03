@@ -310,9 +310,7 @@ async function loginMiFit() {
       miSessionId.value = data.session_id
       miVerificationUrl.value = data.verification_url
       miVerificationOpenedBrowser.value = Boolean(data.opened_browser)
-      if (!data.opened_browser) {
-        window.open(data.verification_url, '_blank', 'noopener,noreferrer')
-      } else {
+      if (data.opened_browser) {
         startMiAutoPoll()
       }
     }
@@ -350,11 +348,18 @@ async function continueMiLogin(silent = false) {
     }
     if (data.status === 'verification_required') {
       miSessionId.value = data.session_id
-      miVerificationUrl.value = data.verification_url
-      miVerificationOpenedBrowser.value = Boolean(data.opened_browser)
-      if (!data.opened_browser) {
+      if (!silent) miVerificationUrl.value = data.verification_url
+      miVerificationOpenedBrowser.value = miVerificationOpenedBrowser.value || Boolean(data.opened_browser)
+    }
+    if (data.status === 'expired') {
+      await loadMiStatus()
+      if (miStatus.value.authenticated) {
         stopMiAutoPoll()
-        window.open(data.verification_url, '_blank', 'noopener,noreferrer')
+        miSessionId.value = ''
+        miVerificationUrl.value = ''
+        miVerificationOpenedBrowser.value = false
+        miLogin.value.password = ''
+        miMessage.value = '小米运动健康登录成功'
       }
     }
   } catch (e) {
@@ -383,7 +388,37 @@ function startMiAutoPoll() {
     }
     miAutoPollInFlight = true
     try {
-      await continueMiLogin(true)
+      const res = await fetch('/api/mi-fit/login/browser-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: miSessionId.value }),
+      })
+      const data = await res.json()
+      if (data.status === 'completed') {
+        stopMiAutoPoll()
+        await continueMiLogin(true)
+      } else if (data.status === 'authenticated') {
+        stopMiAutoPoll()
+        miSessionId.value = ''
+        miVerificationUrl.value = ''
+        miVerificationOpenedBrowser.value = false
+        miLogin.value.password = ''
+        miMessage.value = data.message || '小米运动健康登录成功'
+        await loadMiStatus()
+      } else if (data.status === 'expired' || data.status === 'manual') {
+        await loadMiStatus()
+        if (miStatus.value.authenticated) {
+          stopMiAutoPoll()
+          miSessionId.value = ''
+          miVerificationUrl.value = ''
+          miVerificationOpenedBrowser.value = false
+          miLogin.value.password = ''
+          miMessage.value = '小米运动健康登录成功'
+          return
+        }
+        stopMiAutoPoll()
+        miMessage.value = data.message || '请完成验证后手动点击“我已完成验证”'
+      }
     } finally {
       miAutoPollInFlight = false
     }
@@ -672,10 +707,6 @@ async function handleThemeChange(mode: string) {
               退出登录
             </button>
           </div>
-          <a v-if="miVerificationUrl && !miVerificationOpenedBrowser" class="verify-link" :href="miVerificationUrl" target="_blank" rel="noreferrer">
-            <ExternalLink class="btn-icon" />
-            打开验证页面
-          </a>
           <p v-if="miMessage" class="status-msg">{{ miMessage }}</p>
         </div>
       </div>
@@ -954,18 +985,6 @@ select.input-g { cursor: pointer; }
   width: 20px;
   height: 20px;
   color: var(--color-primary);
-}
-
-.verify-link {
-  min-height: 44px;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  align-self: flex-start;
-  color: var(--color-primary);
-  font-size: 13px;
-  font-weight: 700;
-  text-decoration: none;
 }
 
 .action-row {

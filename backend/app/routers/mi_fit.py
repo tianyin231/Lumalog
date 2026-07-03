@@ -11,6 +11,7 @@ from app.models.user import User
 from app.services.mi_fit_service import (
     backfill_mi_fit_details,
     continue_mi_fit_login,
+    get_mi_fit_login_browser_status,
     get_mi_fit_status,
     import_mi_fit_activities,
     list_mi_fit_activities,
@@ -49,6 +50,11 @@ def login(data: LoginRequest, user: User = Depends(current_user)):
 @router.post("/login/continue")
 def continue_login(data: ContinueLoginRequest, user: User = Depends(current_user)):
     return continue_mi_fit_login(user.id, data.session_id)
+
+
+@router.post("/login/browser-status")
+def login_browser_status(data: ContinueLoginRequest, user: User = Depends(current_user)):
+    return get_mi_fit_login_browser_status(user.id, data.session_id)
 
 
 @router.post("/logout")

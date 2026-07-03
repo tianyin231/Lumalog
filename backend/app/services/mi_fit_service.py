@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import uuid
-import webbrowser
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -51,6 +50,7 @@ def logout_mi_fit(app_user_id: int) -> dict[str, Any]:
 
 
 def start_mi_fit_login(app_user_id: int, email: str, password: str) -> dict[str, Any]:
+    _clear_pending_logins(app_user_id)
     existing_state = load_state(_state_path(app_user_id))
     device_id = existing_state.device_id if existing_state else MiFitnessAuthClient.generate_device_id()
     client = MiFitnessAuthClient(service_id=DEFAULT_SERVICE_ID, trust_env=False)
@@ -69,6 +69,15 @@ def start_mi_fit_login(app_user_id: int, email: str, password: str) -> dict[str,
 def continue_mi_fit_login(app_user_id: int, session_id: str) -> dict[str, Any]:
     pending = PENDING_LOGINS.get(session_id)
     if not pending:
+        status = get_mi_fit_status(app_user_id)
+        if status["authenticated"]:
+            return {
+                "ok": True,
+                "status": "authenticated",
+                "message": "小米运动健康登录成功",
+                "email": status["email"],
+                "state_path": status["state_path"],
+            }
         return {
             "ok": False,
             "status": "expired",
@@ -79,6 +88,13 @@ def continue_mi_fit_login(app_user_id: int, session_id: str) -> dict[str, Any]:
             "ok": False,
             "status": "expired",
             "message": "登录会话不属于当前账号，请重新开始登录",
+        }
+
+    if not pending.get("context"):
+        return {
+            "ok": False,
+            "status": "verification_unavailable",
+            "message": pending.get("browser_error") or "后端临时浏览器未启动，无法读取普通浏览器中的验证结果",
         }
 
     _merge_pending_browser_cookies(pending)
@@ -93,6 +109,28 @@ def continue_mi_fit_login(app_user_id: int, session_id: str) -> dict[str, Any]:
         session_id=session_id,
         open_browser=False,
     )
+
+
+def get_mi_fit_login_browser_status(app_user_id: int, session_id: str) -> dict[str, Any]:
+    pending = PENDING_LOGINS.get(session_id)
+    if not pending or pending.get("app_user_id") != app_user_id:
+        status = get_mi_fit_status(app_user_id)
+        if status["authenticated"]:
+            return {"ok": True, "status": "authenticated", "message": "小米运动健康登录成功"}
+        return {"ok": False, "status": "expired", "message": "登录会话已过期，请重新开始登录"}
+
+    page = pending.get("page")
+    if not page:
+        return {"ok": True, "status": "manual", "message": "请完成验证后手动确认"}
+
+    try:
+        text = page.locator("body").inner_text(timeout=1000).strip().lower()
+    except Exception:
+        return {"ok": True, "status": "pending", "message": "等待小米验证完成"}
+
+    if text in {"ok", "success"} or any(marker in text for marker in ("验证成功", "验证通过", "已完成")):
+        return {"ok": True, "status": "completed", "message": "验证已完成，正在读取凭证"}
+    return {"ok": True, "status": "pending", "message": "等待小米验证完成"}
 
 
 def list_mi_fit_activities(
@@ -237,11 +275,11 @@ def _try_password_login(
                 "verification_url": exc.notification_url,
             }
         )
-        opened = _open_verification_browser(pending, exc.notification_url) if open_browser else bool(pending.get("context"))
+        opened = _open_verification_browser(pending, exc.notification_url) if open_browser else False
         message = (
             "小米要求二次验证，请在后端弹出的临时浏览器窗口完成验证，不要使用普通浏览器打开"
             if opened
-            else "小米要求二次验证，请打开验证链接完成后再继续登录"
+            else pending.get("browser_error", "后端临时浏览器启动失败，无法完成自动验证")
         )
         if session_id and not open_browser:
             message = "验证还未完成，或验证不是在后端弹出的临时浏览器窗口中完成的"
@@ -411,35 +449,46 @@ def _max_sample_value(samples: list[Any], attr: str) -> int | None:
 
 
 def _open_verification_browser(pending: dict[str, Any], verification_url: str) -> bool:
+    playwright = None
+    context = None
     try:
         from mi_fitness_sync.cli.app import _requests_cookies_for_playwright
         from playwright.sync_api import sync_playwright
 
         playwright = sync_playwright().start()
-        browser = None
-        for channel in ("chrome", "msedge", None):
-            try:
-                kwargs: dict[str, Any] = {"headless": False}
-                if channel:
-                    kwargs["channel"] = channel
-                browser = playwright.chromium.launch(**kwargs)
-                break
-            except Exception:
-                continue
-        if browser is None:
-            playwright.stop()
-            raise RuntimeError("no browser available")
         parsed = urlparse(verification_url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
-        context = browser.new_context()
+        context = _launch_persistent_system_context(playwright, pending["app_user_id"])
         context.add_cookies(_requests_cookies_for_playwright(pending["client"], origin))
-        page = context.new_page()
+        page = context.pages[0] if context.pages else context.new_page()
         page.goto(verification_url, wait_until="domcontentloaded")
-        pending.update({"playwright": playwright, "browser": browser, "context": context})
+        pending.update({"playwright": playwright, "context": context, "page": page})
         return True
     except Exception:
-        webbrowser.open_new_tab(verification_url)
+        pending["browser_error"] = "后端临时浏览器启动失败，请确认已安装 Playwright Python 包和系统 Chrome/Edge，并重启后端；不需要安装 Playwright 自带 Chromium"
+        try:
+            if context:
+                context.close()
+        finally:
+            if playwright:
+                playwright.stop()
         return False
+
+
+def _launch_persistent_system_context(playwright: Any, app_user_id: int) -> Any:
+    user_data_dir = (MI_FIT_STATE_DIR / "browser_profiles" / f"user_{app_user_id}").resolve()
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+    for channel in ("chrome", "msedge"):
+        try:
+            return playwright.chromium.launch_persistent_context(
+                str(user_data_dir),
+                channel=channel,
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+        except Exception:
+            continue
+    raise RuntimeError("no system Chrome or Edge available")
 
 
 def _merge_pending_browser_cookies(pending: dict[str, Any]) -> None:
@@ -456,8 +505,11 @@ def _merge_pending_browser_cookies(pending: dict[str, Any]) -> None:
 
 def _close_pending_browser(pending: dict[str, Any]) -> None:
     browser = pending.get("browser")
+    context = pending.get("context")
     playwright = pending.get("playwright")
     try:
+        if context:
+            context.close()
         if browser:
             browser.close()
     finally:

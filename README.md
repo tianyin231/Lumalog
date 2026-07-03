@@ -23,31 +23,102 @@ Lumalog 是一个本地优先的减重记录与健康追踪应用，用来记录
 
 ### 环境要求
 
-- Node.js
-- Python
-- npm
+- Node.js 和 npm
+- Python 3.12 或更高版本
+- Chrome 或 Edge：用于小米账号二次验证窗口
 
 ### 安装依赖
 
-```powershell
+本项目建议统一使用 `Mi-Fitness-Sync-main/.venv` 作为后端虚拟环境。下面的命令会安装前端依赖、创建后端虚拟环境，并安装后端与小米同步所需的 Python 包。
+
+macOS / Linux：
+
+```bash
 npm run install:frontend
-cd backend
-..\Mi-Fitness-Sync-main\.venv\Scripts\python.exe -m pip install -r requirements.txt
+cd Mi-Fitness-Sync-main
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r ../backend/requirements.txt
 cd ..
 ```
 
-后端脚本默认使用 `Mi-Fitness-Sync-main/.venv` 里的 Python 环境。如果本地还没有这个虚拟环境，请先创建并安装依赖。
+Windows PowerShell：
+
+```powershell
+npm run install:frontend
+cd Mi-Fitness-Sync-main
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r ..\backend\requirements.txt
+cd ..
+```
+
+安装完成后，可以用下面的命令确认小米二次验证所需的 `playwright` 已可用。
+
+macOS / Linux：
+
+```bash
+Mi-Fitness-Sync-main/.venv/bin/python -c "from playwright.sync_api import sync_playwright; print('playwright ok')"
+```
+
+Windows PowerShell：
+
+```powershell
+.\Mi-Fitness-Sync-main\.venv\Scripts\python.exe -c "from playwright.sync_api import sync_playwright; print('playwright ok')"
+```
 
 ### 启动开发服务
 
-方式一：使用根目录脚本分别启动。
+推荐使用项目自带启动脚本。脚本会检查基础环境、准备前端依赖、创建或更新后端虚拟环境，并同时启动前后端。
+
+macOS / Linux：
+
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+Windows：
 
 ```powershell
-npm run dev:backend
+.\start.bat
+```
+
+下面是手动启动方式，适合需要单独排查前端或后端问题时使用。
+
+需要开两个终端窗口：一个启动后端，一个启动前端。
+
+后端请固定从 `backend` 目录启动。这样数据库、上传文件和小米登录态都会保存到稳定的位置，避免因为启动目录不同导致状态不一致。
+
+macOS / Linux：
+
+```bash
+cd backend
+../Mi-Fitness-Sync-main/.venv/bin/python -m uvicorn main:app --reload --reload-dir app --port 7014
+```
+
+Windows PowerShell：
+
+```powershell
+cd backend
+..\Mi-Fitness-Sync-main\.venv\Scripts\python.exe -m uvicorn main:app --reload --reload-dir app --port 7014
+```
+
+如果你已经激活了虚拟环境，也可以在 `backend` 目录中直接使用：
+
+```bash
+python -m uvicorn main:app --reload --reload-dir app --port 7014
+```
+
+前端在项目根目录启动：
+
+```bash
 npm run dev
 ```
 
-方式二：Windows 下双击 `start.bat`。
+Windows 用户也可以双击 `start.bat` 一次启动前后端。
+
+> 说明：根目录的 `npm run dev:backend` 使用 Windows 虚拟环境路径。macOS / Linux 推荐使用上面的后端启动命令。
 
 默认地址：
 
@@ -64,7 +135,7 @@ npm run dev
 
 ## 配置
 
-AI 食物识别可以在设置页按账号保存，也可以通过环境变量提供默认值：
+AI 食物识别可以在设置页按账号保存配置。也可以通过环境变量提供默认值：
 
 ```env
 OPENAI_API_KEY=
@@ -73,11 +144,30 @@ OPENAI_MODEL=
 AUTH_SECRET=
 ```
 
-小米运动健康登录状态按 Lumalog 账号隔离保存。退出 Lumalog 账号不会自动清除对应的小米授权状态，除非在设置页执行断开或重新登录。
+## 小米运动健康同步
+
+1. 按上面的方式启动后端，确保后端运行在 `Mi-Fitness-Sync-main/.venv` 虚拟环境中。
+2. 打开前端 `http://localhost:7012`，登录 Lumalog 账号。
+3. 进入设置页，在“小米运动健康同步”中输入小米账号和密码，点击“登录小米”。
+4. 如果小米要求二次验证，请在后端自动弹出的 Chrome / Edge 临时窗口中完成验证，不要复制链接到普通浏览器打开。
+5. 验证完成后，前端会自动确认；如果没有自动完成，可以点击“我已完成验证”。
+
+小米登录态会保存到当前后端工作目录下的 `data/mi_fit/user_<Lumalog用户ID>.json`。因此请固定从 `backend` 目录启动后端；否则从项目根目录启动时会读写另一份 `data/mi_fit/`，看起来像登录状态丢失或突然恢复。
+
+当前支持：
+
+- 普通账号密码登录：成功后直接保存登录态。
+- 通知型二次验证：通过后端弹出的 Chrome / Edge 窗口完成。
+
+当前限制：
+
+- 图形验证码或短信 step2 暂不支持在网页中直接完成。如果小米触发这类验证，需要先使用命令行流程完成登录，或等待后续补充验证码输入流程。
+- 退出 Lumalog 账号不会自动清除小米授权状态。如需断开小米账号，请在设置页点击退出小米登录。
+- 不需要执行 `playwright install chromium`。本项目使用本机已经安装的 Chrome 或 Edge。
 
 ## 数据与隐私
 
-本项目默认使用本地 SQLite 数据库，适合个人自托管或本地开发。准备上传仓库时，不要提交以下内容：
+本项目默认使用本地 SQLite 数据库，适合个人自托管或本地开发。以下文件包含个人数据或本地环境信息，请不要提交到公开仓库：
 
 - `backend/weight_minus_minus.db`
 - `data/uploads/`

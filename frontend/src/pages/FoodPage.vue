@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { Bot, ClipboardList, Image, Plus, RotateCcw, X } from 'lucide-vue-next'
+import { Bot, ClipboardList, Eye, Image, Plus, RotateCcw, X } from 'lucide-vue-next'
 
 interface FoodItem { name: string; calories: number; portion?: string; protein_g?: number; carbs_g?: number; fat_g?: number }
 interface FoodRecord {
@@ -22,6 +22,7 @@ const previewUrl = ref<string | null>(null)
 const analysisResult = ref<any>(null)
 const editingItems = ref<FoodItem[]>([])
 const dragActive = ref(false)
+const selectedRecord = ref<FoodRecord | null>(null)
 
 const mealTypes = [
   { v: 'breakfast', l: '早餐' },
@@ -151,7 +152,16 @@ function resetUpload() {
 
 async function deleteRecord(id: number) {
   await fetch(`/api/food/${id}`, { method: 'DELETE' })
+  if (selectedRecord.value?.id === id) selectedRecord.value = null
   await fetchRecords()
+}
+
+function openDetail(record: FoodRecord) {
+  selectedRecord.value = record
+}
+
+function closeDetail() {
+  selectedRecord.value = null
 }
 
 function fmtDate(s: string) {
@@ -254,7 +264,7 @@ function mealLabel(t: string) { return mealTypes.find(m => m.v === t)?.l || t }
         <p class="empty-desc">切换到「AI 拍照识别」来录入第一餐</p>
       </div>
       <div v-else class="food-list">
-        <div v-for="r in records" :key="r.id" class="food-row">
+        <div v-for="r in records" :key="r.id" class="food-row" role="button" tabindex="0" @click="openDetail(r)" @keydown.enter.prevent="openDetail(r)" @keydown.space.prevent="openDetail(r)">
           <img v-if="r.image_path" :src="r.image_path" class="food-thumb" />
           <div v-else class="food-thumb-empty">{{ mealLabel(r.meal_type).slice(0,2) }}</div>
           <div class="flex-1 min-w-0">
@@ -265,7 +275,49 @@ function mealLabel(t: string) { return mealTypes.find(m => m.v === t)?.l || t }
             <div class="food-sub" v-if="r.food_items?.length">{{ r.food_items.map(i => i.name).join('、') }}</div>
             <div class="food-time">{{ fmtDate(r.recorded_at) }}</div>
           </div>
-          <button class="rm-btn" @click="deleteRecord(r.id)" aria-label="删除饮食记录"><X class="x-icon" /></button>
+          <button class="detail-btn" @click.stop="openDetail(r)" aria-label="查看饮食详情"><Eye class="x-icon" /></button>
+          <button class="rm-btn" @click.stop="deleteRecord(r.id)" aria-label="删除饮食记录"><X class="x-icon" /></button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="selectedRecord" class="modal-layer" role="dialog" aria-modal="true" aria-labelledby="food-detail-title">
+      <div class="detail-modal">
+        <div class="detail-head">
+          <div>
+            <p class="detail-kicker">饮食详情</p>
+            <h3 id="food-detail-title" class="detail-title">{{ mealLabel(selectedRecord.meal_type) }} · {{ selectedRecord.total_calories }} kcal</h3>
+            <p class="detail-time">{{ fmtDate(selectedRecord.recorded_at) }}</p>
+          </div>
+          <button class="close-btn" @click="closeDetail" aria-label="关闭饮食详情"><X class="x-icon" /></button>
+        </div>
+
+        <div class="detail-body">
+          <img v-if="selectedRecord.image_path" :src="selectedRecord.image_path" class="detail-img" />
+
+          <div class="macro-grid detail-macros">
+            <div class="macro"><span class="mv">{{ selectedRecord.total_calories }}</span><span class="ml">kcal 总热量</span></div>
+            <div class="macro"><span class="mv">{{ selectedRecord.protein_g ?? '--' }}g</span><span class="ml">蛋白质</span></div>
+            <div class="macro"><span class="mv">{{ selectedRecord.carbs_g ?? '--' }}g</span><span class="ml">碳水</span></div>
+            <div class="macro"><span class="mv">{{ selectedRecord.fat_g ?? '--' }}g</span><span class="ml">脂肪</span></div>
+          </div>
+
+          <div v-if="selectedRecord.food_items?.length" class="detail-items">
+            <div v-for="(item, i) in selectedRecord.food_items" :key="`${item.name}-${i}`" class="detail-item">
+              <div>
+                <strong>{{ item.name }}</strong>
+                <span v-if="item.portion">{{ item.portion }}</span>
+              </div>
+              <div class="item-metrics">
+                <span>{{ item.calories }} kcal</span>
+                <span v-if="item.protein_g !== null && item.protein_g !== undefined">蛋白 {{ item.protein_g }}g</span>
+                <span v-if="item.carbs_g !== null && item.carbs_g !== undefined">碳水 {{ item.carbs_g }}g</span>
+                <span v-if="item.fat_g !== null && item.fat_g !== undefined">脂肪 {{ item.fat_g }}g</span>
+              </div>
+            </div>
+          </div>
+
+          <p v-if="selectedRecord.note" class="ai-note">{{ selectedRecord.note }}</p>
         </div>
       </div>
     </div>
@@ -497,6 +549,14 @@ function mealLabel(t: string) { return mealTypes.find(m => m.v === t)?.l || t }
 
 .rm-btn:hover { color: var(--color-danger); background: rgba(239,68,68,0.08); transform: scale(1.08); }
 
+.detail-btn {
+  background: none; border: none; color: var(--color-primary);
+  cursor: pointer; padding: 6px; border-radius: 8px; transition: transform var(--duration-fast), background var(--duration-base), color var(--duration-base);
+  min-width: 34px; min-height: 34px; display: inline-flex; align-items: center; justify-content: center;
+}
+
+.detail-btn:hover { background: rgba(13,148,136,0.1); transform: scale(1.08); }
+
 .x-icon { width: 16px; height: 16px; }
 
 .add-btn {
@@ -530,6 +590,7 @@ function mealLabel(t: string) { return mealTypes.find(m => m.v === t)?.l || t }
   display: flex; align-items: center; gap: 14px; padding: 14px 0;
   border-bottom: 1px solid var(--color-border-light);
   border-radius: 14px;
+  cursor: pointer;
   transition: transform var(--duration-fast), background var(--duration-base);
 }
 
@@ -555,4 +616,126 @@ function mealLabel(t: string) { return mealTypes.find(m => m.v === t)?.l || t }
 .empty-title { font-weight: 600; color: var(--color-text-muted); }
 .empty-desc { font-size: 13px; color: var(--color-text-muted); margin-top: 4px; }
 .center-text { text-align: center; padding: 32px; color: var(--color-text-muted); }
+
+.modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(15, 23, 42, 0.38);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.detail-modal {
+  width: min(720px, 100%);
+  max-height: calc(100dvh - 40px);
+  overflow: auto;
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+}
+
+.detail-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  background: var(--glass-bg-strong);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.detail-kicker {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-primary);
+  margin-bottom: 3px;
+}
+
+.detail-title {
+  font-family: var(--font-heading);
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.detail-time {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-top: 3px;
+}
+
+.close-btn {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  background: var(--glass-bg);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.detail-body { padding: 20px; }
+
+.detail-img {
+  width: 100%;
+  max-height: 320px;
+  object-fit: cover;
+  border-radius: var(--radius-lg);
+  margin-bottom: 16px;
+}
+
+.detail-macros { margin-bottom: 16px; }
+
+.detail-items {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.detail-item {
+  padding: 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 12px;
+  background: var(--glass-bg);
+}
+
+.detail-item strong {
+  display: block;
+  font-size: 14px;
+}
+
+.detail-item span {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.item-metrics {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.item-metrics span {
+  padding: 3px 7px;
+  border-radius: 7px;
+  background: rgba(13, 148, 136, 0.08);
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 640px) {
+  .modal-layer { padding: 10px; }
+  .detail-head { padding: 16px 14px; }
+  .detail-body { padding: 14px; }
+}
 </style>
