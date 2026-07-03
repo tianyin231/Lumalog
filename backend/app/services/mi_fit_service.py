@@ -2,20 +2,24 @@
 from __future__ import annotations
 
 import uuid
+from html import escape
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urljoin, urlparse
+import re
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from fastapi import Response
+from fastapi.responses import RedirectResponse
 
 from app.models.exercise import ExerciseActivityDetail, ExerciseRecord
 from mi_fitness_sync.activity.client import MiFitnessActivitiesClient
 from mi_fitness_sync.activity.models import Activity, ActivityDetail
 from mi_fitness_sync.auth.client import DEFAULT_SERVICE_ID, MetaLoginData, MiFitnessAuthClient
-from mi_fitness_sync.auth.state import utc_now_iso
+from mi_fitness_sync.auth.state import AuthState, utc_now_iso
 from mi_fitness_sync.auth.store import delete_state, load_state, resolve_state_path, save_state
 from mi_fitness_sync.exceptions import (
     AuthStateNotFoundError,
@@ -29,6 +33,7 @@ from mi_fitness_sync.exceptions import (
 
 PENDING_LOGINS: dict[str, dict[str, Any]] = {}
 MI_FIT_STATE_DIR = Path("data/mi_fit")
+HTML_ATTR_RE = re.compile(r'(?P<attr>\b(?:href|src|action)=)(?P<quote>["\'])(?P<url>[^"\']+)(?P=quote)', re.IGNORECASE)
 
 
 def get_mi_fit_status(app_user_id: int) -> dict[str, Any]:
@@ -49,6 +54,29 @@ def logout_mi_fit(app_user_id: int) -> dict[str, Any]:
     return {"ok": True, "message": "已退出小米运动健康", "state_path": str(path)}
 
 
+def import_mi_fit_auth_state(app_user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    required = ("email", "user_id", "c_user_id", "service_token", "ssecurity", "cookies")
+    missing = [key for key in required if not payload.get(key)]
+    if missing:
+        return {"ok": False, "message": f"登录状态文件缺少字段：{', '.join(missing)}"}
+
+    try:
+        state = AuthState(**payload)
+    except Exception as exc:
+        return {"ok": False, "message": f"登录状态文件格式不正确：{exc}"}
+
+    state = replace(state, updated_at=utc_now_iso())
+    path = save_state(state, _state_path(app_user_id))
+    state = _normalize_health_service_token(app_user_id, state)
+    _clear_pending_logins(app_user_id)
+    return {
+        "ok": True,
+        "message": "小米登录状态已导入",
+        "email": state.email,
+        "state_path": str(path),
+    }
+
+
 def start_mi_fit_login(app_user_id: int, email: str, password: str) -> dict[str, Any]:
     _clear_pending_logins(app_user_id)
     existing_state = load_state(_state_path(app_user_id))
@@ -63,10 +91,15 @@ def start_mi_fit_login(app_user_id: int, email: str, password: str) -> dict[str,
         device_id=device_id,
         meta=meta,
         existing_created_at=existing_state.created_at if existing_state else None,
+        open_browser=False,
     )
 
 
-def continue_mi_fit_login(app_user_id: int, session_id: str) -> dict[str, Any]:
+def continue_mi_fit_login(
+    app_user_id: int,
+    session_id: str,
+    cookies: list[dict[str, object]] | None = None,
+) -> dict[str, Any]:
     pending = PENDING_LOGINS.get(session_id)
     if not pending:
         status = get_mi_fit_status(app_user_id)
@@ -90,14 +123,10 @@ def continue_mi_fit_login(app_user_id: int, session_id: str) -> dict[str, Any]:
             "message": "登录会话不属于当前账号，请重新开始登录",
         }
 
-    if not pending.get("context"):
-        return {
-            "ok": False,
-            "status": "verification_unavailable",
-            "message": pending.get("browser_error") or "后端临时浏览器未启动，无法读取普通浏览器中的验证结果",
-        }
-
-    _merge_pending_browser_cookies(pending)
+    if cookies:
+        _merge_manual_browser_cookies(pending, cookies)
+    elif pending.get("context"):
+        _merge_pending_browser_cookies(pending)
     return _try_password_login(
         app_user_id=app_user_id,
         client=pending["client"],
@@ -109,6 +138,63 @@ def continue_mi_fit_login(app_user_id: int, session_id: str) -> dict[str, Any]:
         session_id=session_id,
         open_browser=False,
     )
+
+
+def proxy_mi_fit_verification(
+    session_id: str,
+    key: str,
+    target: str | None,
+    method: str,
+    headers: dict[str, str],
+    body: bytes,
+) -> Response:
+    pending = PENDING_LOGINS.get(session_id)
+    if not pending or pending.get("proxy_key") != key:
+        return _verification_error_page(
+            "验证会话已过期",
+            "请回到设置页重新点击“登录小米”。如果服务使用了多个后端进程，请先改成单进程运行后再试。",
+        )
+
+    target_url = target or pending.get("verification_url")
+    if not isinstance(target_url, str) or not _is_allowed_verification_url(target_url):
+        return _verification_error_page("验证地址不允许代理", "请重新开始小米登录。")
+
+    client = pending["client"]
+    request_headers = _proxy_request_headers(headers)
+    try:
+        upstream = client.session.request(
+            method,
+            target_url,
+            headers=request_headers,
+            data=body if method.upper() not in {"GET", "HEAD"} else None,
+            allow_redirects=False,
+            timeout=30,
+        )
+    except Exception as exc:
+        return _verification_error_page("验证页代理失败", str(exc))
+
+    if upstream.is_redirect or upstream.is_permanent_redirect:
+        location = upstream.headers.get("location")
+        if not location:
+            return Response(status_code=upstream.status_code)
+        next_url = urljoin(target_url, location)
+        if not _is_allowed_verification_url(next_url):
+            return _verification_error_page("验证跳转地址不允许代理", next_url)
+        return RedirectResponse(_verification_proxy_url(session_id, key, next_url), status_code=302)
+
+    content_type = upstream.headers.get("content-type", "text/html; charset=utf-8")
+    content = upstream.content
+    if "text/html" in content_type.lower():
+        text = upstream.text
+        content = _rewrite_verification_html(text, target_url, session_id, key).encode(upstream.encoding or "utf-8")
+        content_type = "text/html; charset=utf-8"
+
+    response = Response(content=content, status_code=upstream.status_code, media_type=content_type)
+    for name in ("cache-control", "pragma", "expires"):
+        value = upstream.headers.get(name)
+        if value:
+            response.headers[name] = value
+    return response
 
 
 def get_mi_fit_login_browser_status(app_user_id: int, session_id: str) -> dict[str, Any]:
@@ -161,8 +247,9 @@ def import_mi_fit_activities(db: Session, user_id: int, activity_ids: list[str])
 
     for activity_id in activity_ids:
         try:
-            detail = client.get_activity_detail(activity_id)
-            result = _save_activity_detail(db, user_id, detail)
+            with db.begin_nested():
+                detail = client.get_activity_detail(activity_id)
+                result = _save_activity_detail(db, user_id, detail)
             if result == "imported":
                 imported += 1
             else:
@@ -214,8 +301,9 @@ def backfill_mi_fit_details(db: Session, user_id: int) -> dict[str, Any]:
             skipped += 1
             continue
         try:
-            detail = client.get_activity_detail(record.source_id)
-            _save_detail_payload(db, record, detail)
+            with db.begin_nested():
+                detail = client.get_activity_detail(record.source_id)
+                _save_detail_payload(db, record, detail)
             imported += 1
         except Exception as exc:
             failed.append({"source_id": record.source_id or "", "message": str(exc)})
@@ -263,6 +351,7 @@ def _try_password_login(
     except NotificationRequiredError as exc:
         login_id = session_id or uuid.uuid4().hex
         pending = PENDING_LOGINS.setdefault(login_id, {})
+        proxy_key = pending.setdefault("proxy_key", uuid.uuid4().hex)
         pending.update(
             {
                 "client": client,
@@ -279,15 +368,16 @@ def _try_password_login(
         message = (
             "小米要求二次验证，请在后端弹出的临时浏览器窗口完成验证，不要使用普通浏览器打开"
             if opened
-            else pending.get("browser_error", "后端临时浏览器启动失败，无法完成自动验证")
+            else "小米要求二次验证，请打开验证页完成验证，然后点击“我已完成验证”"
         )
         if session_id and not open_browser:
-            message = "验证还未完成，或验证不是在后端弹出的临时浏览器窗口中完成的"
+            message = "验证还未完成；如果普通重试失败，可以粘贴验证后的 Cookie 再确认"
         return {
             "ok": False,
             "status": "verification_required",
             "session_id": login_id,
             "verification_url": exc.notification_url,
+            "verification_proxy_url": _verification_proxy_url(login_id, str(proxy_key), None),
             "opened_browser": opened,
             "message": message,
         }
@@ -326,6 +416,7 @@ def _activities_client(user_id: int) -> MiFitnessActivitiesClient:
     state = load_state(_state_path(user_id))
     if state is None:
         raise AuthStateNotFoundError("尚未登录小米运动健康")
+    state = _normalize_health_service_token(user_id, state)
     return MiFitnessActivitiesClient(state, trust_env=False)
 
 
@@ -337,6 +428,94 @@ def _clear_pending_logins(app_user_id: int) -> None:
     for session_id, pending in list(PENDING_LOGINS.items()):
         if pending.get("app_user_id") == app_user_id:
             _close_pending_browser(PENDING_LOGINS.pop(session_id, {}))
+
+
+def _verification_proxy_url(session_id: str, key: str, target: str | None) -> str:
+    url = f"/api/mi-fit/login/proxy/{session_id}?key={quote(key)}"
+    if target:
+        url += f"&target={quote(target, safe='')}"
+    return url
+
+
+def _is_allowed_verification_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = parsed.hostname or ""
+    return host == "mi.com" or host.endswith(".mi.com") or host == "xiaomi.com" or host.endswith(".xiaomi.com")
+
+
+def _proxy_request_headers(headers: dict[str, str]) -> dict[str, str]:
+    blocked = {"host", "cookie", "content-length", "authorization", "connection", "accept-encoding"}
+    return {key: value for key, value in headers.items() if key.lower() not in blocked}
+
+
+def _rewrite_verification_html(html: str, base_url: str, session_id: str, key: str) -> str:
+    def replace_attr(match: re.Match[str]) -> str:
+        raw_url = match.group("url").strip()
+        if not raw_url or raw_url.startswith(("#", "javascript:", "mailto:", "tel:", "data:")):
+            return match.group(0)
+        next_url = urljoin(base_url, raw_url)
+        if not _is_allowed_verification_url(next_url):
+            return match.group(0)
+        return f'{match.group("attr")}{match.group("quote")}{_verification_proxy_url(session_id, key, next_url)}{match.group("quote")}'
+
+    rewritten = HTML_ATTR_RE.sub(replace_attr, html)
+    parsed = urlparse(base_url)
+    browser_path = parsed.path or "/"
+    if parsed.query:
+        browser_path += f"?{parsed.query}"
+    if parsed.fragment:
+        browser_path += f"#{parsed.fragment}"
+    shim = (
+        "<script>"
+        f"history.replaceState(null, '', {browser_path!r});"
+        "</script>"
+    )
+    rewritten = rewritten.replace("<head>", f"<head>{shim}", 1)
+    rewritten = rewritten.replace("</head>", '<base href="/"></head>', 1)
+    return rewritten
+
+
+def _verification_error_page(title: str, detail: str) -> Response:
+    safe_title = escape(title)
+    safe_detail = escape(detail)
+    html = f"""
+    <!doctype html>
+    <html lang="zh-CN">
+      <head>
+        <meta charset="utf-8" />
+        <title>{safe_title}</title>
+        <style>
+          body {{ font-family: system-ui, sans-serif; padding: 32px; line-height: 1.6; color: #10201f; }}
+          main {{ max-width: 680px; margin: 0 auto; }}
+          code {{ overflow-wrap: anywhere; }}
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>{safe_title}</h1>
+          <p>{safe_detail}</p>
+          <p>处理后请关闭这个页面，回到 Lumalog 设置页继续。</p>
+        </main>
+      </body>
+    </html>
+    """
+    return Response(html, status_code=200, media_type="text/html; charset=utf-8")
+
+
+def _normalize_health_service_token(app_user_id: int, state: Any) -> Any:
+    for cookie in reversed(state.cookies):
+        if cookie.get("name") != "serviceToken":
+            continue
+        domain = cookie.get("domain")
+        if isinstance(domain, str) and "sts-hlth.io.mi.com" in domain:
+            token = cookie.get("value")
+            if isinstance(token, str) and token and token != state.service_token:
+                state = replace(state, service_token=token, updated_at=utc_now_iso())
+                save_state(state, _state_path(app_user_id))
+            break
+    return state
 
 
 def _imported_source_ids(db: Session, user_id: int) -> set[str]:
@@ -499,6 +678,15 @@ def _merge_pending_browser_cookies(pending: dict[str, Any]) -> None:
         from mi_fitness_sync.cli.app import _merge_playwright_cookies
 
         _merge_playwright_cookies(pending["client"], context.cookies())
+    except Exception:
+        return
+
+
+def _merge_manual_browser_cookies(pending: dict[str, Any], cookies: list[dict[str, object]]) -> None:
+    try:
+        from mi_fitness_sync.cli.app import _merge_playwright_cookies
+
+        _merge_playwright_cookies(pending["client"], cookies)
     except Exception:
         return
 

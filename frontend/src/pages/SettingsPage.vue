@@ -38,6 +38,7 @@ const accountMessage = ref('')
 const accountError = ref('')
 const avatarInput = ref<HTMLInputElement | null>(null)
 const avatarUploading = ref(false)
+const miStateInput = ref<HTMLInputElement | null>(null)
 const passwordForm = ref({ current_password: '', new_password: '', confirm_password: '' })
 const passwordSaving = ref(false)
 const passwordMessage = ref('')
@@ -46,7 +47,9 @@ const miStatus = ref<any>({ authenticated: false })
 const miLogin = ref({ email: '', password: '' })
 const miSessionId = ref('')
 const miVerificationUrl = ref('')
+const miVerificationProxyUrl = ref('')
 const miVerificationOpenedBrowser = ref(false)
+const miManualCookies = ref('')
 const miAutoPolling = ref(false)
 let miAutoPollTimer: number | null = null
 let miAutoPollAttempts = 0
@@ -292,7 +295,9 @@ async function loginMiFit() {
   miMessage.value = ''
   miSessionId.value = ''
   miVerificationUrl.value = ''
+  miVerificationProxyUrl.value = ''
   miVerificationOpenedBrowser.value = false
+  miManualCookies.value = ''
   stopMiAutoPoll()
   try {
     const res = await fetch('/api/mi-fit/login', {
@@ -309,6 +314,7 @@ async function loginMiFit() {
     if (data.status === 'verification_required') {
       miSessionId.value = data.session_id
       miVerificationUrl.value = data.verification_url
+      miVerificationProxyUrl.value = data.verification_proxy_url || ''
       miVerificationOpenedBrowser.value = Boolean(data.opened_browser)
       if (data.opened_browser) {
         startMiAutoPoll()
@@ -332,7 +338,7 @@ async function continueMiLogin(silent = false) {
     const res = await fetch('/api/mi-fit/login/continue', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: miSessionId.value }),
+      body: JSON.stringify(buildMiContinuePayload()),
     })
     const data = await res.json()
     if (!silent || data.ok || data.status !== 'verification_required') {
@@ -342,13 +348,16 @@ async function continueMiLogin(silent = false) {
       stopMiAutoPoll()
       miSessionId.value = ''
       miVerificationUrl.value = ''
+      miVerificationProxyUrl.value = ''
       miVerificationOpenedBrowser.value = false
+      miManualCookies.value = ''
       miLogin.value.password = ''
       await loadMiStatus()
     }
     if (data.status === 'verification_required') {
       miSessionId.value = data.session_id
       if (!silent) miVerificationUrl.value = data.verification_url
+      if (!silent) miVerificationProxyUrl.value = data.verification_proxy_url || miVerificationProxyUrl.value
       miVerificationOpenedBrowser.value = miVerificationOpenedBrowser.value || Boolean(data.opened_browser)
     }
     if (data.status === 'expired') {
@@ -357,7 +366,9 @@ async function continueMiLogin(silent = false) {
         stopMiAutoPoll()
         miSessionId.value = ''
         miVerificationUrl.value = ''
+        miVerificationProxyUrl.value = ''
         miVerificationOpenedBrowser.value = false
+        miManualCookies.value = ''
         miLogin.value.password = ''
         miMessage.value = '小米运动健康登录成功'
       }
@@ -367,6 +378,37 @@ async function continueMiLogin(silent = false) {
     if (!silent) miMessage.value = '继续登录失败'
   } finally {
     if (!silent) testingMi.value = false
+  }
+}
+
+async function importMiStateFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  testingMi.value = true
+  miMessage.value = ''
+  try {
+    const body = new FormData()
+    body.append('file', file)
+    const data = await (await fetch('/api/mi-fit/login/import-state', {
+      method: 'POST',
+      body,
+    })).json()
+    miMessage.value = data.message || (data.ok ? '导入成功' : '导入失败')
+    if (data.ok) {
+      miSessionId.value = ''
+      miVerificationUrl.value = ''
+      miVerificationProxyUrl.value = ''
+      miVerificationOpenedBrowser.value = false
+      miManualCookies.value = ''
+      await loadMiStatus()
+    }
+  } catch (e) {
+    console.error(e)
+    miMessage.value = '导入登录状态失败'
+  } finally {
+    input.value = ''
+    testingMi.value = false
   }
 }
 
@@ -401,7 +443,9 @@ function startMiAutoPoll() {
         stopMiAutoPoll()
         miSessionId.value = ''
         miVerificationUrl.value = ''
+        miVerificationProxyUrl.value = ''
         miVerificationOpenedBrowser.value = false
+        miManualCookies.value = ''
         miLogin.value.password = ''
         miMessage.value = data.message || '小米运动健康登录成功'
         await loadMiStatus()
@@ -411,7 +455,9 @@ function startMiAutoPoll() {
           stopMiAutoPoll()
           miSessionId.value = ''
           miVerificationUrl.value = ''
+          miVerificationProxyUrl.value = ''
           miVerificationOpenedBrowser.value = false
+          miManualCookies.value = ''
           miLogin.value.password = ''
           miMessage.value = '小米运动健康登录成功'
           return
@@ -444,7 +490,9 @@ async function logoutMiFit() {
     stopMiAutoPoll()
     miSessionId.value = ''
     miVerificationUrl.value = ''
+    miVerificationProxyUrl.value = ''
     miVerificationOpenedBrowser.value = false
+    miManualCookies.value = ''
     await loadMiStatus()
   } catch (e) {
     console.error(e)
@@ -452,6 +500,44 @@ async function logoutMiFit() {
   } finally {
     testingMi.value = false
   }
+}
+
+function buildMiContinuePayload() {
+  const body: any = { session_id: miSessionId.value }
+  const raw = miManualCookies.value.trim()
+  if (!raw) return body
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) body.cookies = parsed
+  } catch {
+    const parsed = parseCookieHeader(raw)
+    if (parsed.length > 0) {
+      body.cookies = parsed
+    } else {
+      miMessage.value = 'Cookie 格式无法识别，将直接重试登录'
+    }
+  }
+  return body
+}
+
+function parseCookieHeader(raw: string) {
+  return raw
+    .replace(/^cookie:\s*/i, '')
+    .split(';')
+    .map(part => part.trim())
+    .filter(Boolean)
+    .map(part => {
+      const index = part.indexOf('=')
+      if (index <= 0) return null
+      return {
+        name: part.slice(0, index).trim(),
+        value: part.slice(index + 1).trim(),
+        domain: 'account.xiaomi.com',
+        path: '/',
+        secure: true,
+      }
+    })
+    .filter(Boolean)
 }
 
 async function syncMiFit() {
@@ -690,6 +776,19 @@ async function handleThemeChange(mode: string) {
               <LogIn class="btn-icon" />
               {{ testingMi ? '登录中...' : '登录小米' }}
             </button>
+            <button v-if="!miStatus.authenticated" class="btn-secondary pressable" @click="miStateInput?.click()" :disabled="testingMi">
+              <KeyRound class="btn-icon" />
+              导入登录状态
+            </button>
+            <input ref="miStateInput" type="file" accept="application/json,.json" hidden @change="importMiStateFile" />
+            <a v-if="miSessionId && (miVerificationProxyUrl || miVerificationUrl)" class="btn-secondary pressable" :href="miVerificationProxyUrl || miVerificationUrl" target="_blank" rel="noreferrer">
+              <ExternalLink class="btn-icon" />
+              打开验证页
+            </a>
+            <a v-if="miSessionId && miVerificationProxyUrl && miVerificationUrl" class="btn-secondary pressable" :href="miVerificationUrl" target="_blank" rel="noreferrer">
+              <ExternalLink class="btn-icon" />
+              原始验证页
+            </a>
             <button v-if="miSessionId" class="btn-secondary pressable" @click="continueMiLogin()" :disabled="testingMi">
               <ExternalLink class="btn-icon" />
               {{ testingMi ? '确认中...' : miAutoPolling ? '自动确认中...' : '我已完成验证' }}
@@ -706,6 +805,10 @@ async function handleThemeChange(mode: string) {
               <LogOut class="btn-icon" />
               退出登录
             </button>
+          </div>
+          <div v-if="miSessionId" class="field">
+            <label class="f-label">验证后的 Cookie（可选）</label>
+            <textarea v-model="miManualCookies" class="input-g cookie-input" placeholder='可粘贴浏览器请求头里的 Cookie: a=b; c=d，或 Playwright cookies JSON 数组'></textarea>
           </div>
           <p v-if="miMessage" class="status-msg">{{ miMessage }}</p>
         </div>
@@ -918,6 +1021,7 @@ async function handleThemeChange(mode: string) {
 
 .input-g:focus { border-color: var(--color-primary); box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1); background: var(--glass-bg-hover); transform: translateY(-1px); }
 select.input-g { cursor: pointer; }
+.cookie-input { min-height: 88px; resize: vertical; font-family: var(--font-mono, monospace); }
 
 .hint { font-size: 11px; color: var(--color-text-muted); margin-top: 2px; }
 

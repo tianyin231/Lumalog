@@ -311,6 +311,13 @@ class MiFitnessAuthClient:
         raise XiaomiApiError("STS response did not include a Mi Fitness serviceToken.")
 
     def _read_sts_cookie(self, response: requests.Response, cookie_name: str) -> str | None:
+        sts_matches = [
+            cookie.value
+            for cookie in self.session.cookies
+            if cookie.name == cookie_name and "sts-hlth.io.mi.com" in (cookie.domain or "")
+        ]
+        if sts_matches:
+            return sts_matches[-1]
         for cookie in self.session.cookies:
             if cookie.name == cookie_name:
                 return cookie.value

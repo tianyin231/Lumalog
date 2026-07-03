@@ -66,6 +66,69 @@ def ensure_lightweight_migrations():
             if "user_id" not in table_columns:
                 conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER DEFAULT 1")
                 conn.exec_driver_sql(f"UPDATE {table} SET user_id = 1 WHERE user_id IS NULL")
+        ensure_exercise_detail_user_unique(conn)
+
+
+def ensure_exercise_detail_user_unique(conn):
+    indexes = conn.exec_driver_sql("PRAGMA index_list(exercise_activity_details)").fetchall()
+    for index in indexes:
+        if not index[2]:
+            continue
+        columns = [
+            row[2]
+            for row in conn.exec_driver_sql(f"PRAGMA index_info({index[1]})").fetchall()
+        ]
+        if columns == ["source", "source_id"]:
+            rebuild_exercise_activity_details(conn)
+            return
+
+
+def rebuild_exercise_activity_details(conn):
+    conn.exec_driver_sql("ALTER TABLE exercise_activity_details RENAME TO exercise_activity_details_old")
+    conn.exec_driver_sql(
+        """
+        CREATE TABLE exercise_activity_details (
+            id INTEGER NOT NULL,
+            user_id INTEGER DEFAULT 1,
+            exercise_record_id INTEGER NOT NULL,
+            source VARCHAR(30) NOT NULL,
+            source_id VARCHAR(100) NOT NULL,
+            track_points_json JSON,
+            samples_json JSON,
+            raw_report_json JSON,
+            raw_detail_json JSON,
+            sport_report_json JSON,
+            recovery_rate_json JSON,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            CONSTRAINT uq_exercise_detail_user_source_id UNIQUE (user_id, source, source_id),
+            FOREIGN KEY(user_id) REFERENCES users (id),
+            FOREIGN KEY(exercise_record_id) REFERENCES exercise_records (id)
+        )
+        """
+    )
+    conn.exec_driver_sql(
+        """
+        INSERT INTO exercise_activity_details (
+            id, user_id, exercise_record_id, source, source_id,
+            track_points_json, samples_json, raw_report_json, raw_detail_json,
+            sport_report_json, recovery_rate_json, created_at, updated_at
+        )
+        SELECT
+            id, COALESCE(user_id, 1), exercise_record_id, source, source_id,
+            track_points_json, samples_json, raw_report_json, raw_detail_json,
+            sport_report_json, recovery_rate_json, created_at, updated_at
+        FROM exercise_activity_details_old
+        """
+    )
+    conn.exec_driver_sql("DROP TABLE exercise_activity_details_old")
+    conn.exec_driver_sql(
+        "CREATE INDEX ix_exercise_activity_details_user_id ON exercise_activity_details (user_id)"
+    )
+    conn.exec_driver_sql(
+        "CREATE INDEX ix_exercise_activity_details_exercise_record_id ON exercise_activity_details (exercise_record_id)"
+    )
 
 
 def migrate_legacy_uploads():

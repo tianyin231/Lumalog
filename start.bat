@@ -7,6 +7,7 @@ set "FRONTEND_PORT=7012"
 set "BACKEND_PORT=7014"
 set "VENV_DIR=Mi-Fitness-Sync-main\.venv"
 set "BACKEND_PY=%VENV_DIR%\Scripts\python.exe"
+set "BACKEND_DEPS_HASH_FILE=%VENV_DIR%\.backend-requirements.sha256"
 
 echo ========================================
 echo   Lumalog - Windows start script
@@ -65,15 +66,27 @@ if not exist "%BACKEND_PY%" (
     )
 )
 
-echo [3/5] Installing backend dependencies...
-pushd backend
-"..\%BACKEND_PY%" -m pip install -r requirements.txt
-if errorlevel 1 (
-    popd
-    pause
-    exit /b 1
+for /f "usebackq delims=" %%H in (`powershell -NoProfile -Command "(Get-FileHash 'backend\requirements.txt' -Algorithm SHA256).Hash"`) do set "BACKEND_DEPS_HASH=%%H"
+set "BACKEND_DEPS_INSTALLED=0"
+if exist "%BACKEND_DEPS_HASH_FILE%" (
+    set /p BACKEND_DEPS_INSTALLED_HASH=<"%BACKEND_DEPS_HASH_FILE%"
+    if "!BACKEND_DEPS_INSTALLED_HASH!"=="!BACKEND_DEPS_HASH!" set "BACKEND_DEPS_INSTALLED=1"
 )
-popd
+
+if "%BACKEND_DEPS_INSTALLED%"=="1" (
+    echo [3/5] Backend dependencies OK
+) else (
+    echo [3/5] Installing backend dependencies...
+    pushd backend
+    "..\%BACKEND_PY%" -m pip install -r requirements.txt
+    if errorlevel 1 (
+        popd
+        pause
+        exit /b 1
+    )
+    popd
+    >"%BACKEND_DEPS_HASH_FILE%" echo %BACKEND_DEPS_HASH%
+)
 
 echo [4/5] Checking Playwright...
 "%BACKEND_PY%" -c "from playwright.sync_api import sync_playwright; print('playwright ok')"

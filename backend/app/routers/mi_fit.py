@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
-from fastapi import APIRouter, Depends, Query
+import json
+
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from sqlalchemy.orm import Session
 
 from app.auth import current_user
@@ -13,9 +15,11 @@ from app.services.mi_fit_service import (
     continue_mi_fit_login,
     get_mi_fit_login_browser_status,
     get_mi_fit_status,
+    import_mi_fit_auth_state,
     import_mi_fit_activities,
     list_mi_fit_activities,
     logout_mi_fit,
+    proxy_mi_fit_verification,
     start_mi_fit_login,
     sync_mi_fit_data,
     test_mi_fit_connection,
@@ -31,6 +35,7 @@ class LoginRequest(BaseModel):
 
 class ContinueLoginRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
+    cookies: list[dict[str, object]] | None = None
 
 
 class ImportRequest(BaseModel):
@@ -49,12 +54,41 @@ def login(data: LoginRequest, user: User = Depends(current_user)):
 
 @router.post("/login/continue")
 def continue_login(data: ContinueLoginRequest, user: User = Depends(current_user)):
-    return continue_mi_fit_login(user.id, data.session_id)
+    return continue_mi_fit_login(user.id, data.session_id, data.cookies)
+
+
+@router.post("/login/import-state")
+async def import_login_state(file: UploadFile = File(...), user: User = Depends(current_user)):
+    content = await file.read()
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except Exception:
+        return {"ok": False, "message": "登录状态文件不是有效 JSON"}
+    if not isinstance(payload, dict):
+        return {"ok": False, "message": "登录状态文件格式不正确"}
+    return import_mi_fit_auth_state(user.id, payload)
 
 
 @router.post("/login/browser-status")
 def login_browser_status(data: ContinueLoginRequest, user: User = Depends(current_user)):
     return get_mi_fit_login_browser_status(user.id, data.session_id)
+
+
+@router.api_route("/login/proxy/{session_id}", methods=["GET", "POST"])
+async def login_proxy(
+    session_id: str,
+    request: Request,
+    key: str = Query(..., min_length=1),
+    target: str | None = Query(None),
+):
+    return proxy_mi_fit_verification(
+        session_id=session_id,
+        key=key,
+        target=target,
+        method=request.method,
+        headers=dict(request.headers),
+        body=await request.body(),
+    )
 
 
 @router.post("/logout")
